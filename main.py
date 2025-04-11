@@ -14,6 +14,8 @@ import database as db
 import modal
 import re
 import asyncio
+from PIL import Image, ImageDraw
+from pdf2image import convert_from_bytes
 
 # Create logs directory if it doesn't exist
 logs_dir = Path("logs")
@@ -44,6 +46,7 @@ app.add_middleware(
 
 # Get reference to the deployed Modal function
 run_ollama_prompt = modal.Function.from_name("flashcard-generator", "run_ollama_prompt")
+process_image_with_llama = modal.Function.from_name("flashcard-generator", "process_image_with_llama")
 
 # User dependency
 async def get_current_user(user_id: str = Form(...)):
@@ -79,22 +82,68 @@ def extract_text_from_pptx(file_content: bytes) -> str:
     logger.info(f"Extracted {len(text)} characters from PPTX")
     return text
 
+def convert_pptx_to_images(pptx_content: bytes) -> List[Image.Image]:
+    """Convert PPTX content to a list of PIL Images."""
+    logger.info("Converting PPTX to images")
+    pptx_file = io.BytesIO(pptx_content)
+    prs = Presentation(pptx_file)
+    images = []
+    
+    for slide in prs.slides:
+        # Create a new image for each slide
+        img = Image.new('RGB', (1920, 1080), color='white')
+        draw = ImageDraw.Draw(img)
+        
+        # Add text from shapes
+        for shape in slide.shapes:
+            if hasattr(shape, "text"):
+                # Calculate text position (simplified)
+                text = shape.text
+                text_width = draw.textlength(text)
+                text_position = ((1920 - text_width) / 2, 540)  # Center text
+                draw.text(text_position, text, fill='black')
+        
+        images.append(img)
+    
+    logger.info(f"Converted {len(images)} slides to images")
+    return images
+
+def convert_pdf_to_images(pdf_content: bytes) -> List[Image.Image]:
+    """Convert PDF content to a list of PIL Images."""
+    logger.info("Converting PDF to images")
+    return convert_from_bytes(pdf_content)
+
 async def generate_flashcards(text: str, num_cards: int = 10) -> List[Dict[str, str]]:
     """Generate flashcards from text using Ollama."""
     logging.info(f"Starting flashcard generation for text of length {len(text)}")
     logging.info(f"Requesting {num_cards} flashcards")
     
-    prompt = f"""Generate {num_cards} flashcards from the following text. Return ONLY a JSON array of objects with 'question' and 'answer' fields.
+    prompt = f"""Generate {num_cards} high-quality flashcards from the following text. Focus on key concepts, definitions, and facts that are likely to appear on a test or exam.
+
+Guidelines for the flashcards:
+1. Focus on important concepts, definitions, and key facts
+2. Include specific details, numbers, and dates that might be tested
+3. Create questions that test understanding rather than just memorization
+4. Include both basic recall questions and more complex application questions
+5. Make sure answers are concise but complete
+6. Cover a range of difficulty levels
+7. Include questions about relationships between concepts
+8. Focus on information that would be most valuable in a test setting
+
+CRITICAL INSTRUCTION: You must return ONLY a valid JSON array containing objects with EXACTLY these two fields: "question" and "answer".
+DO NOT include any other fields like "title", "creative_title", "reference_list", or "in_text_citations".
+DO NOT include any additional text, markdown formatting, or explanations.
+
 Example format:
 [
-    {{"question": "What is X?", "answer": "X is Y"}},
-    {{"question": "Who discovered Z?", "answer": "Z was discovered by W"}}
+    {{"question": "What is the key concept of X and how does it relate to Y?", "answer": "X is a fundamental principle that... It relates to Y by..."}},
+    {{"question": "What are the three main components of Z and their functions?", "answer": "The three components are: 1) A - responsible for..., 2) B - handles..., 3) C - manages..."}}
 ]
 
 Text to generate flashcards from:
 {text}
 
-Remember to return ONLY the JSON array with no additional text or formatting."""
+Remember: Return ONLY the JSON array with objects containing ONLY "question" and "answer" fields."""
 
     try:
         logging.info("Calling Modal function run_ollama_prompt...")
@@ -114,24 +163,111 @@ Remember to return ONLY the JSON array with no additional text or formatting."""
             try:
                 cards = json.loads(response)
                 if isinstance(cards, list):
-                    logging.info(f"Successfully parsed JSON array with {len(cards)} cards")
-                    return cards
+                    # Check if the cards have the correct format
+                    valid_cards = []
+                    for card in cards:
+                        if isinstance(card, dict) and "question" in card and "answer" in card:
+                            valid_cards.append({
+                                "question": card["question"],
+                                "answer": card["answer"]
+                            })
+                    
+                    if valid_cards:
+                        logging.info(f"Successfully parsed JSON array with {len(valid_cards)} valid cards")
+                        return valid_cards
+                    else:
+                        logging.warning("Parsed JSON array but no valid cards found")
             except json.JSONDecodeError:
                 # If that fails, try to extract JSON from the response
                 logging.info("Failed to parse entire response as JSON, trying to extract JSON array")
             
-            # Look for text between square brackets
-            match = re.search(r'\[(.*?)\]', response, re.DOTALL)
+            # Look for text between square brackets, handling potential markdown code blocks
+            # First try to find a JSON array in a code block
+            code_block_match = re.search(r'```(?:json)?\s*(\[[\s\S]*?\])\s*```', response)
+            if code_block_match:
+                json_str = code_block_match.group(1)
+                try:
+                    cards = json.loads(json_str)
+                    if isinstance(cards, list):
+                        # Check if the cards have the correct format
+                        valid_cards = []
+                        for card in cards:
+                            if isinstance(card, dict) and "question" in card and "answer" in card:
+                                valid_cards.append({
+                                    "question": card["question"],
+                                    "answer": card["answer"]
+                                })
+                        
+                        if valid_cards:
+                            logging.info(f"Successfully extracted JSON from code block with {len(valid_cards)} valid cards")
+                            return valid_cards
+                        else:
+                            logging.warning("Extracted JSON from code block but no valid cards found")
+                except json.JSONDecodeError:
+                    logging.warning("Failed to parse JSON from code block")
+            
+            # If no code block found or parsing failed, try to find any JSON array
+            match = re.search(r'(\[[\s\S]*?\])', response)
             if match:
-                json_str = f"[{match.group(1)}]"
-                cards = json.loads(json_str)
-                logging.info(f"Successfully extracted JSON array with {len(cards)} cards")
-                return cards
-            else:
-                logging.warning("No JSON array found in response")
-                return generate_fallback_cards(num_cards)
-        except json.JSONDecodeError as e:
-            logging.error(f"Failed to parse JSON from response: {e}")
+                json_str = match.group(1)
+                try:
+                    cards = json.loads(json_str)
+                    if isinstance(cards, list):
+                        # Check if the cards have the correct format
+                        valid_cards = []
+                        for card in cards:
+                            if isinstance(card, dict) and "question" in card and "answer" in card:
+                                valid_cards.append({
+                                    "question": card["question"],
+                                    "answer": card["answer"]
+                                })
+                        
+                        if valid_cards:
+                            logging.info(f"Successfully extracted JSON array with {len(valid_cards)} valid cards")
+                            return valid_cards
+                        else:
+                            logging.warning("Extracted JSON array but no valid cards found")
+                except json.JSONDecodeError:
+                    logging.warning("Failed to parse extracted JSON array")
+            
+            # If all extraction attempts fail, try to clean the response and parse it
+            cleaned_response = re.sub(r'```.*?```', '', response, flags=re.DOTALL)  # Remove code blocks
+            cleaned_response = re.sub(r'^.*?\[', '[', cleaned_response, flags=re.DOTALL)  # Remove text before first [
+            cleaned_response = re.sub(r'\].*?$', ']', cleaned_response, flags=re.DOTALL)  # Remove text after last ]
+            
+            try:
+                cards = json.loads(cleaned_response)
+                if isinstance(cards, list):
+                    # Check if the cards have the correct format
+                    valid_cards = []
+                    for card in cards:
+                        if isinstance(card, dict) and "question" in card and "answer" in card:
+                            valid_cards.append({
+                                "question": card["question"],
+                                "answer": card["answer"]
+                            })
+                    
+                    if valid_cards:
+                        logging.info(f"Successfully parsed cleaned JSON with {len(valid_cards)} valid cards")
+                        return valid_cards
+                    else:
+                        logging.warning("Parsed cleaned JSON but no valid cards found")
+            except json.JSONDecodeError:
+                logging.warning("Failed to parse cleaned JSON")
+            
+            # If we still don't have valid cards, try to extract question-answer pairs from the text
+            logging.info("Attempting to extract question-answer pairs from text")
+            qa_pairs = re.findall(r'["\']question["\']\s*:\s*["\']([^"\']+)["\']\s*,\s*["\']answer["\']\s*:\s*["\']([^"\']+)["\']', response)
+            if qa_pairs:
+                valid_cards = [{"question": q, "answer": a} for q, a in qa_pairs]
+                logging.info(f"Successfully extracted {len(valid_cards)} question-answer pairs from text")
+                return valid_cards
+            
+            logging.warning("No valid JSON array or question-answer pairs found in response after all attempts")
+            return generate_fallback_cards(num_cards)
+            
+        except Exception as e:
+            logging.error(f"Error processing JSON: {str(e)}")
             return generate_fallback_cards(num_cards)
             
     except Exception as e:
@@ -265,7 +401,6 @@ async def process_file(
     file: Optional[UploadFile] = File(None),
     text: Optional[str] = Form(None)
 ):
-    """Process a file or text and add flashcards to a deck."""
     try:
         content_text = ""
         
@@ -273,14 +408,62 @@ async def process_file(
             logger.info(f"Processing file: {file.filename}")
             file_content = await file.read()
             if file.filename.endswith('.pdf'):
-                content_text = extract_text_from_pdf(file_content)
+                images = convert_pdf_to_images(file_content)
+                all_content = []
+                for image in images:
+                    # Convert image to bytes
+                    buffered = io.BytesIO()
+                    image.save(buffered, format="PNG")
+                    image_bytes = buffered.getvalue()
+                    
+                    # Define the message for flashcard generation
+                    message = (
+                        "Analyze the content of this image and generate at least two high-quality flashcards. "
+                        "Focus on key concepts, definitions, and facts that are likely to appear on a test or exam. "
+                        "Each flashcard should have a 'question' and an 'answer'."
+                    )
+                    
+                    # Process image with llama3.2-vision
+                    response = await process_image_with_llama.remote.aio(image_bytes, message)
+                    all_content.append(response)
+                
+                content_text = "\n\n".join(all_content)
             elif file.filename.endswith('.pptx'):
-                content_text = extract_text_from_pptx(file_content)
+                images = convert_pptx_to_images(file_content)
+                all_content = []
+                for image in images:
+                    # Convert image to bytes
+                    buffered = io.BytesIO()
+                    image.save(buffered, format="PNG")
+                    image_bytes = buffered.getvalue()
+                    
+                    # Define the message for flashcard generation
+                    message = (
+                        "Analyze the content of this slide and generate at least two high-quality flashcards. "
+                        "Focus on key concepts, definitions, and facts that are likely to appear on a test or exam. "
+                        "Each flashcard should have a 'question' and an 'answer'."
+                    )
+                    
+                    # Process image with llama3.2-vision
+                    response = await process_image_with_llama.remote.aio(image_bytes, message)
+                    all_content.append(response)
+                
+                content_text = "\n\n".join(all_content)
+            elif file.filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+                # Define the message for flashcard generation
+                message = (
+                    "Analyze the content of this image and generate at least two high-quality flashcards. "
+                    "Focus on key concepts, definitions, and facts that are likely to appear on a test or exam. "
+                    "Each flashcard should have a 'question' and an 'answer'."
+                )
+                
+                # Process image with llama3.2-vision
+                content_text = await process_image_with_llama.remote.aio(file_content, message)
             else:
                 logger.warning(f"Unsupported file format: {file.filename}")
                 return JSONResponse(
                     status_code=400,
-                    content={"error": "Unsupported file format. Please upload PDF or PPTX files."}
+                    content={"error": "Unsupported file format. Please upload PDF, PPTX, or image files (PNG, JPG, JPEG)."}
                 )
         elif text:
             logger.info("Processing text input")
@@ -292,17 +475,9 @@ async def process_file(
                 content={"error": "No file or text provided"}
             )
         
-        if not content_text.strip():
-            logger.warning("No content extracted from input")
-            return JSONResponse(
-                status_code=400,
-                content={"error": "No content could be extracted from the input"}
-            )
-        
         flashcards = await generate_flashcards(content_text)
         logger.info(f"Generated {len(flashcards)} flashcards")
         
-        # Import flashcards into the deck
         db.import_flashcards(deck_id, flashcards)
         
         return {"message": f"Successfully added {len(flashcards)} flashcards to deck", "flashcards": flashcards}
