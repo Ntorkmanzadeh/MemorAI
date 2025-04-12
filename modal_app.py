@@ -9,8 +9,9 @@ from PIL import Image
 import io
 from pdf2image import convert_from_bytes
 import os
-from typing import List
+from typing import List, Tuple
 import base64
+import asyncio
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -35,6 +36,11 @@ def setup_ollama():
     logger.info("Pulling llama3.2-vision model...")
     subprocess.run(["ollama", "pull", "llama3.2-vision"], check=True)
     logger.info("Model pulled successfully")
+
+    logger.info("Pulling llama3.2 model...")
+    subprocess.run(["ollama", "pull", "llama3.2"], check=True)
+    logger.info("Model pulled successfully")
+    
     
     # Stop Ollama server
     server_process.terminate()
@@ -168,105 +174,151 @@ async def process_image_with_llama(image_data: bytes, message: str) -> str:
             server_process.wait()
             logger.info("Ollama server stopped")
 
-@app.function(image=image, timeout=300, gpu="A10G")  # Request A10G GPU
-async def process_multiple_images_with_llama(images: List[bytes], message: str) -> str:
-    """Process multiple images with llama3.2-vision model, one at a time within a single Ollama session."""
+@app.function(image=image, timeout=300, gpu="A10G")
+def process_single_image(img_data: bytes, page_num: int, total_pages: int) -> Tuple[int, str]:
+    """Process a single image and return its page number and response."""
     server_process = None
     try:
         # Start Ollama in the background
-        logger.info("Starting Ollama server...")
+        logger.info(f"Starting Ollama server for page {page_num}...")
         server_process = subprocess.Popen(["ollama", "serve"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         time.sleep(5)  # Wait for server to start
-        logger.info("Ollama server started, waiting for it to be ready...")
         
         # Check if server is ready
         for i in range(3):
             try:
                 response = requests.get("http://localhost:11434/api/tags", timeout=5)
                 if response.status_code == 200:
-                    logger.info("Ollama server is ready")
+                    logger.info(f"Ollama server is ready for page {page_num}")
                     break
             except:
-                logger.info(f"Waiting for Ollama server to be ready (attempt {i+1}/3)...")
+                logger.info(f"Waiting for Ollama server to be ready for page {page_num} (attempt {i+1}/3)...")
                 time.sleep(5)
         
-        # Process each image individually
-        all_responses = []
-        for i, img_data in enumerate(images, 1):
-            logger.info(f"Processing image {i} of {len(images)}")
-            
-            # Convert image to base64
-            base64_image = base64.b64encode(img_data).decode('utf-8')
-            
-            # Use a fixed prompt for image analysis
-            page_prompt = f"Analyze this image (page {i} of {len(images)}). Provide a detailed summary of the content."
-            
-            # Make the request with timeout
-            logger.info(f"Sending request to Ollama for page {i}")
-            response = requests.post(
-                "http://localhost:11434/api/generate",
-                json={
-                    "model": "llama3.2-vision",
-                    "prompt": page_prompt,
-                    "images": [base64_image],  # Changed to match process_image_with_llama format
-                    "stream": False,
-                    "context_window": 4096,
-                    "temperature": 0.7,
-                    "num_predict": 2048
-                },
-                timeout=240  # 4 minute timeout
-            )
-            response.raise_for_status()
-            
-            # Parse response
-            result = response.json()
-            page_response = result.get("response", "")
-            
-            # Add page demarcation
-            all_responses.append(f"=== Page {i} ===\n{page_response}\n")
+        # Convert image to base64
+        base64_image = base64.b64encode(img_data).decode('utf-8')
         
-        # Now process all the page summaries together to generate flashcards
-        logger.info("Generating flashcards from all page summaries")
-        combined_summaries = "\n\n".join(all_responses)
+        # Use a fixed prompt for image analysis
+        page_prompt = f"Analyze this image (page {page_num} of {total_pages}). Provide a detailed summary of the content."
+        logger.info(f"Page {page_num} prompt: {page_prompt}")
         
-        # Use the provided message for the final flashcard generation
-        final_prompt = f"{message}\n\nPage Summaries:\n{combined_summaries}"
-        
-        final_response = requests.post(
+        # Make the request with timeout
+        logger.info(f"Sending request to Ollama for page {page_num}")
+        response = requests.post(
             "http://localhost:11434/api/generate",
             json={
                 "model": "llama3.2-vision",
-                "prompt": final_prompt,
+                "prompt": page_prompt,
+                "images": [base64_image],
                 "stream": False,
                 "context_window": 4096,
                 "temperature": 0.7,
-                "num_predict": 2048
+                "num_predict": 1024
             },
             timeout=240
         )
-        final_response.raise_for_status()
+        response.raise_for_status()
         
-        # Get the final flashcards
-        final_result = final_response.json()
-        flashcards = final_result.get("response", "")
+        # Parse response
+        result = response.json()
+        vision_response = result.get("response", "")
+        logger.info(f"=== Vision Model Response for Page {page_num} ===")
+        logger.info(vision_response)
+        logger.info("=" * 50)
         
-        return flashcards
+        return page_num, vision_response
         
-    except Timeout:
-        logger.error("Request to Ollama timed out after 240 seconds")
-        return "Error: Request timed out"
-    except RequestException as e:
-        logger.error(f"Request error: {str(e)}")
-        return f"Error: Request failed - {str(e)}"
     except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}")
-        return f"Error: {str(e)}"
+        logger.error(f"Error processing image {page_num}: {str(e)}")
+        return page_num, f"Error processing page {page_num}: {str(e)}"
     finally:
         if server_process:
-            logger.info("Stopping Ollama server...")
+            logger.info(f"Stopping Ollama server for page {page_num}...")
             server_process.terminate()
             server_process.wait()
-            logger.info("Ollama server stopped")
+            logger.info(f"Ollama server stopped for page {page_num}")
+
+def split_into_chunks(summaries, max_words=1024):
+    chunks = []
+    current_chunk = []
+    current_word_count = 0
+
+    for summary in summaries:
+        word_count = len(summary.split())
+        if current_word_count + word_count > max_words:
+            chunks.append("\n\n".join(current_chunk))
+            current_chunk = []
+            current_word_count = 0
+
+        current_chunk.append(summary)
+        current_word_count += word_count
+
+    if current_chunk:
+        chunks.append("\n\n".join(current_chunk))
+
+    return chunks
+
+@app.function(image=image, timeout=600, gpu="A10G")
+def process_multiple_images_with_llama(images: List[bytes], message: str) -> str:
+    """Process multiple images with llama3.2-vision model using Modal's map() for parallel execution."""
+    try:
+        # Process images in parallel using Modal's map()
+        total_pages = len(images)
+        logger.info(f"Processing {total_pages} images in parallel using Modal's map()...")
+        
+        # Create a list of argument tuples for starmap
+        args_list = [(img_data, i+1, total_pages) for i, img_data in enumerate(images)]
+        
+        all_responses = list(process_single_image.starmap(args_list))
+        sorted_responses = sorted(all_responses, key=lambda x: x[0])
+        formatted_responses = [f"=== Page {page_num} ===\n{response}\n" for page_num, response in sorted_responses]
+        
+        # Split the combined summaries into chunks
+        chunks = split_into_chunks(formatted_responses)
+
+        final_flashcards = []
+        for chunk in chunks:
+            logger.info("Processing chunk:")
+            logger.info(chunk)
+            final_prompt = f"{message}\n\nPage Summaries:\n{chunk}"
+            server_process = subprocess.Popen(["ollama", "serve"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            time.sleep(5)
+
+            for i in range(3):
+                try:
+                    response = requests.get("http://localhost:11434/api/tags", timeout=5)
+                    if response.status_code == 200:
+                        break
+                except:
+                    time.sleep(5)
+
+            final_response = requests.post(
+                "http://localhost:11434/api/generate",
+                json={
+                    "model": "llama3.2",
+                    "prompt": final_prompt,
+                    "stream": False,
+                    "context_window": 32768,
+                    "temperature": 0.7,
+                    "num_predict": 32768
+                },
+                timeout=240
+            )
+            final_response.raise_for_status()
+            final_result = final_response.json()
+            flashcards = final_result.get("response", "")
+            logger.info("Response for chunk:")
+            logger.info(flashcards)
+            final_flashcards.append(flashcards)
+
+            server_process.terminate()
+            server_process.wait()
+
+        return "\n\n".join(final_flashcards)
+        
+    except Exception as e:
+        logger.error(f"Error: {str(e)}")
+        return f"Error: {str(e)}"
 
 def convert_pdf_to_images(pdf_content: bytes) -> List[Image.Image]:
     """Convert PDF content to a list of PIL Images."""

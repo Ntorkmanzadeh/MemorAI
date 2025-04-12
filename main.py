@@ -422,9 +422,16 @@ async def process_file(
                 
                 # Define the message for flashcard generation
                 message = (
-                    "Bewlow are summaries made by llma3.2-vision for a series of pages from a PDF. Please analyze the content of these pages and provide a detailed description of the contents now the combines informationa cross pages. "
-                    "Focus on key concepts, definitions, and facts that are likely to appear on a test or exam. Note that some pages mey be steps in an imation so the contetn should be very very similar. If that is the case, try to represent the full idea acorss all steps isntead of jsut repeating your self. "
-                    "This is about integration of content. Not you but, the next model will need details because it will need to generate flashcards from this information. Be specific."
+                    "Below are summaries made by llama3.2-vision for a series of pages from a PDF. Please analyze the content of these pages and provide a comprehensive, detailed description that synthesizes information across all pages. "
+                    "Your summary should be thorough and specific, maintaining at least 50% of the original length. "
+                    "For each key concept, include:\n"
+                    "- Precise definitions and terminology\n"
+                    "- Step-by-step explanations of processes\n"
+                    "- Specific examples and applications\n"
+                    "- Relationships between different concepts\n"
+                    "- Important numerical values or measurements\n\n"
+                    "Note: Some pages may show sequential steps in a process or animation. In such cases, explain the complete process flow rather than repeating similar information. "
+                    "This summary will be used to generate detailed flashcards, so include all specific details, formulas, and technical terms that would be important for exam preparation."
                 )
                 
                 # Process all images at once
