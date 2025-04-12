@@ -47,6 +47,7 @@ app.add_middleware(
 # Get reference to the deployed Modal function
 run_ollama_prompt = modal.Function.from_name("flashcard-generator", "run_ollama_prompt")
 process_image_with_llama = modal.Function.from_name("flashcard-generator", "process_image_with_llama")
+process_multiple_images_with_llama = modal.Function.from_name("flashcard-generator", "process_multiple_images_with_llama")
 
 # User dependency
 async def get_current_user(user_id: str = Form(...)):
@@ -408,56 +409,59 @@ async def process_file(
             logger.info(f"Processing file: {file.filename}")
             file_content = await file.read()
             if file.filename.endswith('.pdf'):
+                logger.info("Starting PDF processing")
                 images = convert_pdf_to_images(file_content)
-                all_content = []
+                logger.info(f"Converted PDF to {len(images)} images")
+                
+                # Convert all images to bytes
+                image_bytes_list = []
                 for image in images:
-                    # Convert image to bytes
                     buffered = io.BytesIO()
                     image.save(buffered, format="PNG")
-                    image_bytes = buffered.getvalue()
-                    
-                    # Define the message for flashcard generation
-                    message = (
-                        "Analyze the content of this image and generate at least two high-quality flashcards. "
-                        "Focus on key concepts, definitions, and facts that are likely to appear on a test or exam. "
-                        "Each flashcard should have a 'question' and an 'answer'."
-                    )
-                    
-                    # Process image with llama3.2-vision
-                    response = await process_image_with_llama.remote.aio(image_bytes, message)
-                    all_content.append(response)
+                    image_bytes_list.append(buffered.getvalue())
                 
-                content_text = "\n\n".join(all_content)
-            elif file.filename.endswith('.pptx'):
-                images = convert_pptx_to_images(file_content)
-                all_content = []
-                for image in images:
-                    # Convert image to bytes
-                    buffered = io.BytesIO()
-                    image.save(buffered, format="PNG")
-                    image_bytes = buffered.getvalue()
-                    
-                    # Define the message for flashcard generation
-                    message = (
-                        "Analyze the content of this slide and generate at least two high-quality flashcards. "
-                        "Focus on key concepts, definitions, and facts that are likely to appear on a test or exam. "
-                        "Each flashcard should have a 'question' and an 'answer'."
-                    )
-                    
-                    # Process image with llama3.2-vision
-                    response = await process_image_with_llama.remote.aio(image_bytes, message)
-                    all_content.append(response)
-                
-                content_text = "\n\n".join(all_content)
-            elif file.filename.lower().endswith(('.png', '.jpg', '.jpeg')):
                 # Define the message for flashcard generation
                 message = (
-                    "Analyze the content of this image and generate at least two high-quality flashcards. "
+                    "Bewlow are summaries made by llma3.2-vision for a series of pages from a PDF. Please analyze the content of these pages and provide a detailed description of the contents now the combines informationa cross pages. "
+                    "Focus on key concepts, definitions, and facts that are likely to appear on a test or exam. Note that some pages mey be steps in an imation so the contetn should be very very similar. If that is the case, try to represent the full idea acorss all steps isntead of jsut repeating your self. "
+                    "This is about integration of content. Not you but, the next model will need details because it will need to generate flashcards from this information. Be specific."
+                )
+                
+                # Process all images at once
+                logger.info(f"Processing {len(image_bytes_list)} images in batch")
+                content_text = await process_multiple_images_with_llama.remote.aio(image_bytes_list, message)
+                
+            elif file.filename.endswith('.pptx'):
+                logger.info("Starting PPTX processing")
+                images = convert_pptx_to_images(file_content)
+                logger.info(f"Converted PPTX to {len(images)} images")
+                
+                # Convert all images to bytes
+                image_bytes_list = []
+                for image in images:
+                    buffered = io.BytesIO()
+                    image.save(buffered, format="PNG")
+                    image_bytes_list.append(buffered.getvalue())
+                
+                # Define the message for flashcard generation
+                message = (
+                    "Analyze the content of these slides and generate high-quality flashcards. "
                     "Focus on key concepts, definitions, and facts that are likely to appear on a test or exam. "
                     "Each flashcard should have a 'question' and an 'answer'."
                 )
                 
-                # Process image with llama3.2-vision
+                # Process all images at once
+                logger.info(f"Processing {len(image_bytes_list)} slides in batch")
+                content_text = await process_multiple_images_with_llama.remote.aio(image_bytes_list, message)
+                
+            elif file.filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+                # For single images, use the existing function
+                message = (
+                    "Analyze the content of this image and generate high-quality flashcards. "
+                    "Focus on key concepts, definitions, and facts that are likely to appear on a test or exam. "
+                    "Each flashcard should have a 'question' and an 'answer'."
+                )
+                
                 content_text = await process_image_with_llama.remote.aio(file_content, message)
             else:
                 logger.warning(f"Unsupported file format: {file.filename}")
