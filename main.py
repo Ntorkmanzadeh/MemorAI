@@ -114,7 +114,7 @@ def convert_pdf_to_images(pdf_content: bytes) -> List[Image.Image]:
     logger.info("Converting PDF to images")
     return convert_from_bytes(pdf_content)
 
-async def generate_flashcards(text: str, num_cards: int = 10) -> List[Dict[str, str]]:
+async def generate_flashcards(text: str, num_cards: int = 20) -> List[Dict[str, str]]:
     """Generate flashcards from text using Ollama."""
     logging.info(f"Starting flashcard generation for text of length {len(text)}")
     logging.info(f"Requesting {num_cards} flashcards")
@@ -144,7 +144,7 @@ Example format:
 Text to generate flashcards from:
 {text}
 
-Remember: Return ONLY the JSON array with objects containing ONLY "question" and "answer" fields."""
+Remember: Return ONLY the JSON array with objects containing ONLY "question" and "answer" fields. You also must generate at least {num_cards} cards."""
 
     try:
         logging.info("Calling Modal function run_ollama_prompt...")
@@ -485,7 +485,6 @@ async def process_file(
                 status_code=400,
                 content={"error": "No file or text provided"}
             )
-        
         flashcards = await generate_flashcards(content_text)
         logger.info(f"Generated {len(flashcards)} flashcards")
         

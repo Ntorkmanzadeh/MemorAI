@@ -40,6 +40,10 @@ def setup_ollama():
     logger.info("Pulling llama3.2 model...")
     subprocess.run(["ollama", "pull", "llama3.2"], check=True)
     logger.info("Model pulled successfully")
+
+    logger.info("Pulling llama3.3 model...")
+    subprocess.run(["ollama", "pull", "llama3.3"], check=True)
+    logger.info("Model pulled successfully")
     
     
     # Stop Ollama server
@@ -55,8 +59,8 @@ image = (
     .run_function(setup_ollama)
 )
 
-@app.function(image=image, timeout=300, gpu="A10G")  # Request A10G GPU
-async def run_ollama_prompt(prompt: str, model: str = "llama3.2-vision") -> str:
+@app.function(image=image, timeout=300, gpu="L40S")  # Request L40S GPU
+async def run_ollama_prompt(prompt: str, model: str = "llama3.3") -> str:
     """Run a prompt through Ollama and return the response."""
     server_process = None
     try:
@@ -86,11 +90,11 @@ async def run_ollama_prompt(prompt: str, model: str = "llama3.2-vision") -> str:
                 "model": model,
                 "prompt": prompt,
                 "stream": False,
-                "context_window": 2048,  # Limit context window
+                "context_window": 32768,  # Limit context window
                 "temperature": 0.7,      # Add some randomness but keep it focused
-                "num_predict": 1024      # Limit response length
+                "num_predict": 32768      # Limit response length
             },
-            timeout=240  # 4 minute timeout for the request
+            timeout=600  # 4 minute timeout for the request
         )
         response.raise_for_status()
         result = response.json()["response"]
