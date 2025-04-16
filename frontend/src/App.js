@@ -48,6 +48,7 @@ function App() {
   // State for deck management
   const [decks, setDecks] = useState([]);
   const [selectedDeck, setSelectedDeck] = useState('');
+  const [selectedDeckName, setSelectedDeckName] = useState('');
   const [newDeckName, setNewDeckName] = useState('');
   const [newDeckDescription, setNewDeckDescription] = useState('');
   const [showNewDeck, setShowNewDeck] = useState(false);
@@ -68,19 +69,72 @@ function App() {
   useEffect(() => {
     if (userId) {
       loadDecks();
+    } else {
+      setDecks([]); // Clear decks when user logs out
     }
   }, [userId]);
 
+  // Load flashcards when deck is selected
+  useEffect(() => {
+    console.log("useEffect triggered for selectedDeck:", selectedDeck);
+    if (selectedDeck) {
+      loadFlashcards();
+    } else {
+      setFlashcards([]); // Clear flashcards when no deck is selected
+    }
+  }, [selectedDeck]);
+
   const loadDecks = async () => {
+    if (!userId) {
+      setDecks([]);
+      return;
+    }
+    
     try {
-      const response = await axios.get('http://localhost:8000/decks', {
-        headers: {
-          'Content-Type': 'multipart/form-data',
-        },
-      });
+      const response = await axios.get(`http://localhost:8000/decks?user_id=${userId}`);
       setDecks(response.data.decks);
     } catch (err) {
       setError('Failed to load decks: ' + (err.response?.data?.detail || err.message));
+      setDecks([]);
+    }
+  };
+
+  const loadFlashcards = async (retryCount = 0) => {
+    if (!selectedDeck) {
+      setFlashcards([]);
+      return;
+    }
+    
+    console.log(`Loading flashcards for deck: ${selectedDeck} (attempt ${retryCount + 1})`);
+    
+    try {
+      const response = await axios.get(`http://localhost:8000/decks/${selectedDeck}/flashcards`);
+      
+      if (response.data && response.data.flashcards) {
+        console.log(`Loaded ${response.data.flashcards.length} flashcards`);
+        setFlashcards(response.data.flashcards);
+        
+        // If we got zero flashcards and this is the first attempt, retry once after a short delay
+        // This helps in cases where the database might need a moment to update
+        if (response.data.flashcards.length === 0 && retryCount === 0) {
+          console.log("No flashcards found on first attempt, retrying in 1 second...");
+          setTimeout(() => loadFlashcards(retryCount + 1), 1000);
+        }
+      } else {
+        console.error("Invalid response format:", response);
+        setError('Invalid response format when loading flashcards');
+        setFlashcards([]);
+      }
+    } catch (err) {
+      console.error("Error loading flashcards:", err);
+      setError('Failed to load flashcards: ' + (err.response?.data?.detail || err.message));
+      setFlashcards([]);
+      
+      // If this is the first failure, retry once
+      if (retryCount === 0) {
+        console.log("Failed to load flashcards, retrying in 1 second...");
+        setTimeout(() => loadFlashcards(retryCount + 1), 1000);
+      }
     }
   };
 
@@ -101,6 +155,9 @@ function App() {
       localStorage.setItem('userName', response.data.name);
       setShowSignUp(false);
       setSuccess('Successfully signed up!');
+      
+      // Load decks after successful sign-up
+      await loadDecks();
     } catch (err) {
       setError('Failed to sign up: ' + (err.response?.data?.detail || err.message));
     }
@@ -119,23 +176,30 @@ function App() {
         },
       });
       
-      if (response.data && response.data.deck_id) {
-        setDecks([...decks, {
-          id: response.data.deck_id,
-          name: response.data.name,
-          description: response.data.description
-        }]);
-        setShowNewDeck(false);
-        setNewDeckName('');
-        setNewDeckDescription('');
-        setSuccess('Deck created successfully!');
-      } else {
-        throw new Error('Invalid response format from server');
-      }
+      // Make sure the new deck has all required properties
+      const newDeck = {
+        id: response.data.deck_id || response.data.id,
+        name: response.data.name,
+        description: response.data.description,
+        user_id: response.data.user_id
+      };
+      
+      // Add the new deck to the decks array
+      const updatedDecks = [...decks, newDeck];
+      setDecks(updatedDecks);
+      
+      // Clear form inputs
+      setNewDeckName('');
+      setNewDeckDescription('');
+      setShowNewDeck(false);
+      
+      // Automatically select the newly created deck
+      setSelectedDeck(newDeck.id);
+      setSelectedDeckName(newDeck.name);
+      
+      setSuccess('Deck created successfully!');
     } catch (err) {
-      const errorMessage = err.response?.data?.detail || err.message || 'Unknown error occurred';
-      setError('Failed to create deck: ' + errorMessage);
-      console.error('Deck creation error:', err);
+      setError('Failed to create deck: ' + (err.response?.data?.detail || err.message));
     }
   };
 
@@ -161,45 +225,85 @@ function App() {
     setText(event.target.value);
   };
 
-  const handleSubmit = async (event) => {
-    event.preventDefault();
+  const handleProcessFile = async (event) => {
+    // Prevent the default form submission behavior
+    if (event) {
+      event.preventDefault();
+    }
+
     if (!selectedDeck) {
       setError('Please select a deck first');
       return;
     }
 
+    if (!file && !text) {
+      setError('Please provide either a file or text');
+      return;
+    }
+
+    // Log the selected deck ID to debug the issue
+    console.log("Processing with deck ID:", selectedDeck);
+    
     setLoading(true);
     setError('');
-    setSuccess('');
-    setFlashcards([]);
-
-    const formData = new FormData();
-    if (file) {
-      formData.append('file', file);
-    }
-    if (text) {
-      formData.append('text', text);
-    }
-    formData.append('deck_id', selectedDeck);
-    formData.append('user_id', userId);
-
+    setSuccess('Processing started. This may take 2-5 minutes for large files...');
+    
     try {
+      const formData = new FormData();
+      formData.append('deck_id', selectedDeck);
+      formData.append('user_id', userId);
+      
+      if (file) {
+        formData.append('file', file);
+      }
+      if (text) {
+        formData.append('text', text);
+      }
+
+      // Store current deck ID to maintain selection
+      const currentDeckId = selectedDeck;
+
       const response = await axios.post('http://localhost:8000/process-file', formData, {
         headers: {
           'Content-Type': 'multipart/form-data',
         },
+        // Set a longer timeout for the request (5 minutes)
+        timeout: 300000,
       });
+
+      // Reset file/text inputs
+      setFile(null);
+      setText('');
       
-      if (response.data.flashcards && Array.isArray(response.data.flashcards)) {
-        setFlashcards(response.data.flashcards);
-        setSuccess('Flashcards generated successfully!');
-      } else {
-        setError('Invalid response format from server');
-      }
+      // Immediately load the flashcards instead of waiting
+      console.log("Processing complete, loading flashcards immediately");
+      
+      // Force a refresh of the flashcards state by temporarily clearing it
+      setFlashcards([]);
+      
+      // Force UI update by triggering state changes
+      // This is key to making the flashcards appear without switching decks
+      setSelectedDeck('');
+      
+      // Small timeout to ensure state updates in sequence
+      setTimeout(() => {
+        setSelectedDeck(currentDeckId);
+        
+        // After resetting the selected deck, immediately load the flashcards
+        setTimeout(async () => {
+          try {
+            await loadFlashcards();
+            setSuccess('Flashcards generated and loaded successfully!');
+          } catch (err) {
+            console.error("Error loading flashcards:", err);
+            setError('Error loading flashcards: ' + err.message);
+          }
+        }, 100);
+      }, 50);
+      
     } catch (err) {
-      const errorMessage = err.response?.data?.detail || err.response?.data?.error || err.message || 'An error occurred while processing your request.';
-      setError('Failed to process file: ' + errorMessage);
-      console.error('Process file error:', err);
+      console.error("Error in processing file:", err);
+      setError('Failed to process content: ' + (err.response?.data?.detail || err.message));
     } finally {
       setLoading(false);
     }
@@ -240,6 +344,20 @@ function App() {
   const copyToClipboard = (text) => {
     navigator.clipboard.writeText(text);
     setSuccess('Copied to clipboard!');
+  };
+
+  const handleDeckSelect = (deckId) => {
+    console.log("Selected deck ID:", deckId);
+    
+    // Store the deck ID
+    setSelectedDeck(deckId);
+    
+    // Find the deck object to get its name
+    const deck = decks.find(d => d.id === deckId);
+    setSelectedDeckName(deck ? deck.name : '');
+    
+    // No need to call loadFlashcards() here since the useEffect will trigger
+    // when selectedDeck changes
   };
 
   if (!userId) {
@@ -307,11 +425,15 @@ function App() {
               <InputLabel>Select Deck</InputLabel>
               <Select
                 value={selectedDeck}
-                onChange={(e) => setSelectedDeck(e.target.value)}
+                onChange={(e) => handleDeckSelect(e.target.value)}
                 label="Select Deck"
+                MenuProps={{ 
+                  // This ensures the menu is recreated when decks change
+                  transitionDuration: 0
+                }}
               >
                 {decks.map((deck) => (
-                  <MenuItem key={deck.id} value={deck.id}>
+                  <MenuItem key={`deck-${deck.id}`} value={deck.id}>
                     {deck.name}
                   </MenuItem>
                 ))}
@@ -326,7 +448,7 @@ function App() {
             </Button>
           </Box>
 
-          <form onSubmit={handleSubmit}>
+          <form onSubmit={(e) => handleProcessFile(e)}>
             <Box sx={{ mb: 3 }}>
               <Button
                 variant="contained"

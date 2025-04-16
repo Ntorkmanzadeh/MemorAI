@@ -217,5 +217,21 @@ def import_flashcards(deck_id, flashcards):
     conn.close()
     logger.info(f"Imported {len(flashcards)} flashcards into deck: {deck_id}")
 
+def get_user_by_name(name):
+    """Get a user by name."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, name, created_at FROM users WHERE name = ?", (name,))
+    user = cursor.fetchone()
+    conn.close()
+    
+    if user:
+        return {
+            "id": user[0],
+            "name": user[1],
+            "created_at": user[2]
+        }
+    return None
+
 # Initialize the database when the module is imported
 init_db() 

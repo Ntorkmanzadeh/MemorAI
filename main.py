@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Body
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Body, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import json
@@ -16,6 +16,7 @@ import re
 import asyncio
 from PIL import Image, ImageDraw
 from pdf2image import convert_from_bytes
+import sqlite3
 
 # Create logs directory if it doesn't exist
 logs_dir = Path("logs")
@@ -33,6 +34,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Initialize the database
+db.init_db()
+
 app = FastAPI()
 
 # Configure CORS
@@ -48,6 +52,92 @@ app.add_middleware(
 run_ollama_prompt = modal.Function.from_name("flashcard-generator", "run_ollama_prompt")
 process_image_with_llama = modal.Function.from_name("flashcard-generator", "process_image_with_llama")
 process_multiple_images_with_llama = modal.Function.from_name("flashcard-generator", "process_multiple_images_with_llama")
+
+# Create a default user if none exists
+DEFAULT_USER_ID = "default_user"
+if not db.get_user(DEFAULT_USER_ID):
+    db.create_user("Default User")
+
+@app.post("/create_deck")
+async def create_deck(name: str = Form(...), description: str = Form("")):
+    """Create a new flashcard deck."""
+    try:
+        deck_id = db.create_deck(DEFAULT_USER_ID, name, description)
+        return {"deck_id": deck_id}
+    except Exception as e:
+        logger.error(f"Error creating deck: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/get_decks")
+async def get_decks():
+    """Get all flashcard decks."""
+    try:
+        decks = db.get_decks(DEFAULT_USER_ID)
+        return {"decks": decks}
+    except Exception as e:
+        logger.error(f"Error getting decks: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/add_flashcards/{deck_id}")
+async def add_flashcards(deck_id: str, flashcards: List[Dict[str, str]]):
+    """Add flashcards to a deck."""
+    try:
+        for card in flashcards:
+            db.create_flashcard(deck_id, card["question"], card["answer"])
+        return {"status": "success"}
+    except Exception as e:
+        logger.error(f"Error adding flashcards: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/get_flashcards/{deck_id}")
+async def get_flashcards(deck_id: str):
+    """Get all flashcards in a deck."""
+    try:
+        flashcards = db.get_flashcards(deck_id)
+        return {"flashcards": flashcards}
+    except Exception as e:
+        logger.error(f"Error getting flashcards: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/delete_deck/{deck_id}")
+async def delete_deck(deck_id: str):
+    """Delete a flashcard deck."""
+    try:
+        db.delete_deck(deck_id)
+        return {"status": "success"}
+    except Exception as e:
+        logger.error(f"Error deleting deck: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/delete_flashcard/{card_id}")
+async def delete_flashcard(card_id: str):
+    """Delete a flashcard."""
+    try:
+        db.delete_flashcard(card_id)
+        return {"status": "success"}
+    except Exception as e:
+        logger.error(f"Error deleting flashcard: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/update_flashcard/{card_id}")
+async def update_flashcard(card_id: str, question: str = Form(...), answer: str = Form(...)):
+    """Update a flashcard."""
+    try:
+        db.update_flashcard(card_id, question, answer)
+        return {"status": "success"}
+    except Exception as e:
+        logger.error(f"Error updating flashcard: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/update_deck/{deck_id}")
+async def update_deck(deck_id: str, name: str = Form(...), description: str = Form("")):
+    """Update a flashcard deck."""
+    try:
+        db.update_deck(deck_id, name, description)
+        return {"status": "success"}
+    except Exception as e:
+        logger.error(f"Error updating deck: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # User dependency
 async def get_current_user(user_id: str = Form(...)):
@@ -292,13 +382,21 @@ def generate_fallback_cards(num_cards: int) -> List[Dict[str, str]]:
 # User management endpoints
 @app.post("/users")
 async def create_user(name: str = Form(...)):
-    """Create a new user."""
+    """Create a new user or get existing user with the same name."""
     try:
+        # First check if user with this name already exists
+        existing_user = db.get_user_by_name(name)
+        
+        if existing_user:
+            logger.info(f"Found existing user: {name} (ID: {existing_user['id']})")
+            return {"user_id": existing_user['id'], "name": existing_user['name']}
+            
+        # If no existing user, create a new one
         user_id = db.create_user(name)
         return {"user_id": user_id, "name": name}
     except Exception as e:
-        logger.error(f"Error creating user: {e}")
-        raise HTTPException(status_code=500, detail=f"Error creating user: {str(e)}")
+        logger.error(f"Error creating/getting user: {e}")
+        raise HTTPException(status_code=500, detail=f"Error creating/getting user: {str(e)}")
 
 @app.get("/users/{user_id}")
 async def get_user(user_id: str):
@@ -325,11 +423,20 @@ async def create_deck(user: Dict[str, Any] = Depends(get_current_user), name: st
         raise HTTPException(status_code=500, detail=f"Error creating deck: {str(e)}")
 
 @app.get("/decks")
-async def get_decks(user: Dict[str, Any] = Depends(get_current_user)):
+async def get_decks(user_id: str):
     """Get all decks for a user."""
     try:
-        decks = db.get_decks(user["id"])
+        if not user_id:
+            raise HTTPException(status_code=400, detail="User ID is required")
+            
+        user = db.get_user(user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+            
+        decks = db.get_decks(user_id)
         return {"decks": decks}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting decks: {e}")
         raise HTTPException(status_code=500, detail=f"Error getting decks: {str(e)}")
@@ -397,12 +504,15 @@ async def delete_flashcard(card_id: str):
 
 @app.post("/process-file")
 async def process_file(
-    user: Dict[str, Any] = Depends(get_current_user),
+    user_id: str = Form(...),
     deck_id: str = Form(...),
     file: Optional[UploadFile] = File(None),
     text: Optional[str] = Form(None)
 ):
     try:
+        # Log the deck ID and user ID
+        logger.info(f"Processing file for deck ID: {deck_id}, user ID: {user_id}")
+        
         content_text = ""
         
         if file:
@@ -486,14 +596,20 @@ async def process_file(
                 content={"error": "No file or text provided"}
             )
         flashcards = await generate_flashcards(content_text)
-        logger.info(f"Generated {len(flashcards)} flashcards")
+        logger.info(f"Generated {len(flashcards)} flashcards for deck ID: {deck_id}")
         
+        # Import flashcards into the specified deck
+        logger.info(f"Importing flashcards to deck: {deck_id}")
         db.import_flashcards(deck_id, flashcards)
         
-        return {"message": f"Successfully added {len(flashcards)} flashcards to deck", "flashcards": flashcards}
+        # Fetch the newly imported flashcards to return them
+        updated_flashcards = db.get_flashcards(deck_id)
+        logger.info(f"Successfully added {len(flashcards)} flashcards to deck {deck_id}")
+        
+        return {"message": f"Successfully added {len(flashcards)} flashcards to deck", "flashcards": updated_flashcards}
     
     except Exception as e:
-        logger.error(f"Error processing content: {str(e)}")
+        logger.error(f"Error processing content for deck {deck_id}: {str(e)}")
         return JSONResponse(
             status_code=500,
             content={"error": f"Error processing content: {str(e)}"}
