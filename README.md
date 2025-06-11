@@ -1,4 +1,4 @@
-# Flashcard Generator
+# MemorAI
 
 A web application for generating and managing flashcards from PDF and PPTX files using AI.
 
@@ -61,9 +61,10 @@ Logs are stored in the `logs` directory:
 
 ## Technologies Used
 
-- FastAPI: Web framework
-- Modal: Cloud GPU hosting and parallelization
-- Ollama: LLM management and inference
-- SQLite: Database
-- PyPDF2: PDF processing
-- python-pptx: PPTX processing 
+
+- **[FastAPI](https://fastapi.tiangolo.com/)**  
+- **[Modal](https://modal.com/)** (sign up required)  
+- **[Ollama](https://ollama.com/)** (sign up required)  
+- **SQLite**  
+- **[PyPDF2](https://pypi.org/project/PyPDF2/)**  
+- **[python-pptx](https://python-pptx.readthedocs.io/)**  
